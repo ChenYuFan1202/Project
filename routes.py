@@ -6,7 +6,7 @@ import pandas as pd
 from openai import OpenAI
 from bs4 import BeautifulSoup as bs
 from flask_cors import CORS
-from flask import Flask, make_response, request
+from flask import Flask, make_response, request, Response, stream_with_context
 
 
 app = Flask(__name__)
@@ -286,15 +286,26 @@ def get_analysis():
         嚴謹及專業的角度撰寫此報告，並提及重要的數字佐證以及各個欄位比較的分析，\
             不需要加上粗體、額外的符號以及最後不需要講到與我們聯繫和要注意風險等贅字，並請給純文字 reply in 繁體中文'
 
-    reply = client.chat.completions.create(
-        model = "gpt-3.5-turbo",
-        # model = "gpt-4",
-        messages = [
+    messages = [
             {"role": "system", "content":  "你現在是一位專業的證券分析師, 你會統整近期的比率並進行分析, 然後生成一份專業的趨勢分析報告"},
             {"role": "user", "content": content_message} # user就是代表我們
         ]
+
+    def stream_chat_completion(messages):
+        response = client.chat.completions.create(
+        model = "gpt-3.5-turbo",  # 或 "gpt-4" 根據你的需求
+        messages = messages,
+        stream = True
     )
-    return reply.choices[0].message.content # json.dumps(reply.choices[0].message.content, ensure_ascii = False, indent = 2)
+
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                print(chunk.choices[0].delta.content, flush = True)
+                yield chunk.choices[0].delta.content.encode("utf-8")
+
+
+
+    return Response(stream_with_context(stream_chat_completion(messages)), content_type = "text/plain; charset = utf-8")
 
 if __name__ == "__main__":
     app.run(debug = True)
