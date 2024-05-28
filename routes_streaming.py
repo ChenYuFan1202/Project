@@ -7,7 +7,6 @@ from openai import OpenAI
 from bs4 import BeautifulSoup as bs
 from flask_cors import CORS
 from flask import Flask, make_response, request, Response, stream_with_context
-有料
 
 app = Flask(__name__)
 CORS(app, supports_credentials = True)
