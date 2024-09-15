@@ -1,13 +1,34 @@
 import re
+import os
 import json
 import time
 import requests
-# import numpy as np
 import pandas as pd
+# import numpy as np
 from openai import OpenAI
+from dotenv import load_dotenv
 from bs4 import BeautifulSoup as bs
 from flask_cors import CORS
+from langchain_openai import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
 from flask import Flask, make_response, request
+from langchain.chains import load_summarize_chain
+from langchain_community.vectorstores import FAISS
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import MessagesPlaceholder
+from pydantic import BaseModel, Field
+# from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.runnables import RunnablePassthrough
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_core.output_parsers import StrOutputParser
+from langchain.tools.retriever import create_retriever_tool
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app, supports_credentials = True)
@@ -39,7 +60,7 @@ def get_table():
     "TYPEK": "all",
     "isnew": "false",
     "co_id": stock_id,
-    "year": year,
+    "year": int(year) - 1911,
     "season": 4 # season
     }
     
@@ -645,6 +666,280 @@ def one_year_data():
             dict_format["companies"][2]["governance"][index % 18] = {"year": year, "index": name, "value": value}
 
     return json.dumps(dict_format, ensure_ascii = False, indent = 2)
+
+@app.route("/get_annual_report_summary", methods = ["get"])
+def annual_report_summary():
+    def annual_report(id, y):
+        url = "https://doc.twse.com.tw/server-java/t57sb01"
+
+      # 建立 POST 請求的表單
+        data = {
+          "id": "",
+          "key": "",
+          "step": "1",
+          "co_id": id, # 可以是數字
+          "year": int(y) - 1911 + 1, # 要輸入民國年份 # 可以是數字
+          "seamon": "",
+          "mtype": "F",
+          "dtype": "F04"
+    }
+        # # 這兩行為測試
+        # response = requests.post(url, data = data)
+        # return response
+
+        try:
+          # 發送 POST 請求
+          response = requests.post(url, data = data)
+
+          # 取得回應後擷取檔案名稱
+          soup = bs(response.text, "html.parser")
+          link1 = soup.find("a").text
+          # print(link1)
+        except Exception as e:
+          print(f"發生{e}錯誤")
+
+        # 建立第二個 POST 請求的表單
+        data2 = {
+            "step": "9",
+            "kind": "F",
+            "co_id": id,
+            "filename": link1 # 檔案名稱
+        }
+
+        # 這兩行為測試
+        # response = requests.post(url, data = data2)
+        # return response
+
+        try:
+          # 發送 POST 請求
+          response = requests.post(url, data = data2)
+          soup = bs(response.text, "html.parser")
+          link2 = soup.find("a")
+          # 取得 PDF 連結
+          link2 = link2.get("href")
+        #   print(link2)
+        except Exception as e:
+          print(f"發生{e}錯誤")
+
+        # # 這兩行為測試
+        # response = requests.get("https://doc.twse.com.tw" + link2)
+        # return response
+
+        return "https://doc.twse.com.tw" + link2
+
+    # stock_id = input("請輸入想要查詢的股票代碼: ")
+    # year = input("請輸入西元年度: ")
+    stock_id = request.args.get("stock_id")
+    year = request.args.get("year")
+
+    # 取得目前程式碼所在的目錄
+    current_directory = os.getcwd()
+
+    # 定義你要檢查的資料夾名稱
+    folder_name = "{}_{}_small_chunks_db".format(year, stock_id)
+
+    # 檢查資料夾是否存在
+    folder_path = os.path.join(current_directory, folder_name)
+
+    embeddings_model = OpenAIEmbeddings(model = "text-embedding-3-small")
+
+    if os.path.isdir(folder_path):
+        # print(f"資料夾 '{folder_name}' 存在於當前目錄。")
+        pass
+    else:
+        # print(f"資料夾 '{folder_name}' 不存在於當前目錄。")
+        url = annual_report(stock_id, year)
+        loader = PyPDFLoader(file_path = url)
+        docs = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(separators = ["\n \n", "\n"], 
+                                                      chunk_size = 500, chunk_overlap = 100) # 原本用 1000 和 100
+        splits = text_splitter.split_documents(docs)
+        FAISS_db = FAISS.from_documents(splits, embeddings_model)
+        FAISS_db.save_local(f"{year}_{stock_id}_small_chunks_db") # 這裡有改
+
+    Load_FAISS_db = FAISS.load_local(
+        folder_path = f"{year}_{stock_id}_small_chunks_db", # 這裡有改
+        embeddings = embeddings_model,
+        allow_dangerous_deserialization = True
+    )
+
+    chat_model = ChatOpenAI(model = "gpt-3.5-turbo", api_key = os.getenv("OPENAI_API_KEY")) # 要錄影再改比較好的模型 這裡有改
+
+    key_words = ["公司的業務範疇、主要產品及服務、市場概述",
+                "資本支出重點",
+                "主要財務風險",
+                "市場競爭策略",
+                "技術創新、數位轉型的重要成果",
+                "在環境、社會和治理(ESG)方面的表現",
+                "供應鏈管理上的挑戰",
+                "未來發展計劃",
+                "致股東報告書的摘要",
+                "會計師查核意見"]
+
+    data_list = []
+    for key_word in key_words:
+        data = Load_FAISS_db.max_marginal_relevance_search(key_word, search_type = "mmr", k = 2) # 這裡有改成2，因為 chunk 變小
+        data_list += data
+
+    language_prompt = "請使用繁體中文和台灣用詞輸出報告"
+
+    report_template = [("system", "你的任務是生成年報摘要，"
+                    "請務必保留重點如營收漲跌、開發項目等，生成的內容不應該太攏統，也不是解釋問題，"
+                    "{language}。\n\n"
+                    "輸出的格式請針對各個問題：\n"
+                    "{questions}，列點生成相對應的年報內容，例如：1. 關鍵字: 回覆，關鍵字請利用重點表示而不是疑問句。\n\n"
+                    "請你要用分段的形式好讓使用者方便閱讀，並且不需要在開頭和結尾生成不必要的文字，只要關鍵字和內容就好。\n"
+                    "此外，也請不要將生成內容用括號包起來，直接輸出條列式的文即可。\n\n"
+                    "以下為年報內容：\n{content}")]
+
+    prompt = ChatPromptTemplate.from_messages(messages = report_template).partial(language = language_prompt, 
+                                                                                  questions = key_words)
+
+    str_output_parser = StrOutputParser()
+
+    # stuff 預設是限定變數名為 text，但可以改
+    summarize_chain = load_summarize_chain(llm = chat_model, prompt = prompt, chain_type = "stuff", document_variable_name = "content")
+    str_result = summarize_chain.invoke({"input_documents": data_list})
+    str_result = str_output_parser.invoke(str_result["output_text"])
+    # print(str_result)
+    return str_result
+
+@app.route("/get_QA_response", methods = ["get"])
+def QA_response():
+    # stock_id = "2330" # input("請輸入您想查詢的台灣公司股票代碼: ")
+    # year = "2023" # input("請輸入您想查詢的西元年度: ")
+    stock_id = request.args.get("stock_id")
+    year = request.args.get("year")
+    msg = request.args.get("msg")
+    # msg = input("請輸入您想問的問題: ")
+    # print("我說:", msg)
+
+    embeddings_model = OpenAIEmbeddings(model = "text-embedding-3-small")
+    Load_FAISS_db = FAISS.load_local(
+        folder_path = f"{year}_{stock_id}_small_chunks_db", # 這裡有改
+        embeddings = embeddings_model,
+        allow_dangerous_deserialization = True
+    )
+
+    retriever = Load_FAISS_db.as_retriever(search_type = "similarity", search_kwargs = {"k": 3})
+
+    tool = create_retriever_tool(
+        retriever = retriever,
+        name = "retriever_by_company_annual_report",
+        description = "搜尋並返回公司年報內容"
+    )
+    tools = [tool]
+
+    first_prompt = ChatPromptTemplate.from_messages([
+        ("system", "你是一位善用工具的好助理，請勿回答與公司年報內容無關的問題，這間台灣公司的股票代號是{stock_id}、此年報的年份是{year}。\n"
+        "請自己判斷上下文來回答問題，如果不確定公司名字就不要亂掰，並且使用繁體中文和台灣用語，不要盲目地使用工具。"),
+        MessagesPlaceholder(variable_name = "chat_history"),
+        ("human", "{input}。"),
+        MessagesPlaceholder(variable_name = "agent_scratchpad")
+    ])
+    first_prompt = first_prompt.partial(year = year, stock_id = stock_id)
+    chat_model = ChatOpenAI(model = "gpt-3.5-turbo")
+    first_agent = create_openai_tools_agent(chat_model, tools, first_prompt)
+    first_agent_executor = AgentExecutor(agent = first_agent, tools = tools) # , verbose = True 
+
+
+
+    memory = SQLChatMessageHistory(
+        session_id = "test_id",
+        connection = "sqlite:///history_db"
+    )
+
+    def window_messages(chain_input):
+        # print(len(memory.messages))
+        if len(memory.messages) > 4:
+            cur_messages = memory.messages[-4: ]
+            memory.clear()
+            memory.add_messages(cur_messages)
+        return
+
+    def add_history(first_agent_executor):
+        agent_with_chat_history = RunnableWithMessageHistory(
+            first_agent_executor,
+            lambda session_id: memory,
+            input_messages_key = "input",
+            history_messages_key = "chat_history"
+        )
+        memory_chain = (
+            RunnablePassthrough.assign(messages = window_messages)
+            | agent_with_chat_history
+        )
+        return memory_chain
+
+    first_agent = add_history(first_agent_executor)
+    first_response = first_agent.invoke({"input": msg}, config = {"configurable": {"session_id": "test_id"}})["output"]
+
+
+    search_run = DuckDuckGoSearchRun()
+
+
+    class SearchRun(BaseModel):
+        query: str = Field(description = "給搜尋引擎的搜尋關鍵字, 請使用繁體中文")
+
+    search_run = DuckDuckGoSearchRun(
+        name = "ddg-search", 
+        description = "使用網路搜尋你不知道的事物", 
+        args_schema = SearchRun
+    )
+
+    second_prompt = ChatPromptTemplate.from_messages([
+        ("system", "你是一位善用工具的好助理，"
+        "請利用關鍵字搜尋台灣公司的年報資訊，並且使用繁體中文和台灣用語，不要盲目地使用工具。"),
+        ("human", "此為我感興趣的台灣公司股票代碼{stock_id}，請您幫我搜尋{year}年的年報資訊。"),
+        MessagesPlaceholder(variable_name = "agent_scratchpad")
+    ])
+
+    search_tool = [search_run]
+
+    second_agent = create_openai_tools_agent(chat_model, search_tool, second_prompt)
+    second_agent_executor = AgentExecutor(agent = second_agent, tools = search_tool) # agent 連續使用工具會出事 # , verbose = True
+
+    if "counter" not in globals():
+        # print("執行了")
+        globals()["counter"] = 0
+        globals()["temp_stock_id"] = stock_id
+        globals()["temp_year"] = year
+        globals()["second_response"] = second_agent_executor.invoke({"stock_id": stock_id, "year": year})["output"]
+        # counter += 1
+    # if "counter" not in globals():
+    #     counter = 0
+
+    # if counter == 0:
+    #     # print("執行了")
+    #     temp_stock_id = stock_id
+    #     temp_year = year
+    #     second_response = second_agent_executor.invoke({"stock_id": stock_id, "year": year})["output"]
+    #     counter += 1
+
+    if globals()["temp_stock_id"] != stock_id or globals()["temp_year"] != year:
+        # print("執行了!!")
+        globals()["second_response"] = second_agent_executor.invoke({"stock_id": stock_id, "year": year})["output"]
+        globals()["temp_stock_id"] = stock_id
+        globals()["temp_year"] = year
+
+    str_parser = StrOutputParser()
+
+    third_prompt = ChatPromptTemplate.from_messages([
+        ("system", "你是一位台灣專業的財務分析師，"
+        "你會根據此台灣公司的年報資訊來思考第一個 GenAI 所生出的回覆**是否正確**，第一個 GenAI 生出的回覆可能會錯，所以請務必注意!\n"
+        "請你使用**繁體中文和台灣用語**來回答使用者。\n"
+        "注意，內容要**以回答使用者所問的問題為主**，此外，不要提到資料來源。\n"
+        "請務必遵照以下內容：\n 請**不要在開頭加入公司介紹與重複問題以及不要在結尾加入總結**，只需要**輸出回覆即可**。\n"
+        "最後，請輸出方便使用者閱讀的格式，例如有標題等。"),
+        ("human", "此為使用者問的問題{question}和第一個 GenAI 生出的內容{first_response}，不需要重複輸出問題。"),
+        ("human", "以下為股票代碼為{stock_id}的台灣公司的{year}年報資訊:\n"
+        "{second_response}")
+    ])
+
+    third_agent = third_prompt | chat_model | str_parser
+    third_response = third_agent.invoke({"stock_id": stock_id, "year": year, 
+                                        "first_response": first_response, "second_response": globals()["second_response"], "question": msg})
+    # print(third_response)
+    return third_response
 
 if __name__ == "__main__":
     app.run(debug = True)
