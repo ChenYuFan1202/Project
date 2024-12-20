@@ -3,8 +3,9 @@ import os
 import json
 import time
 import requests
-import pandas as pd
 # import numpy as np
+import pandas as pd
+import yfinance as yf
 from openai import OpenAI
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -99,66 +100,62 @@ def get_ratio():
         stock_ids = [int(stock_ids)]
 
     """
-    DebtRatio
-    LongTermLiabilitiesRatio
-    CurrentRatio
-    QuickRatio
-    InterestCoverage
-    AccountsReceivableTurnover
-    AccountsReceivableTurnoverDay
-    InventoryTurnover
-    InventoryTurnoverDay
-    TotalAssetTurnover
-    GrossMargin
-    OperatingMargin
-    NetIncomeMargin
-    ROA
-    ROE
-    OperatingCashflowToCurrentLiability
-    OperatingCashflowToLiability
-    OperatingCashflowToNetProfit
+    以下的比率會先跟自己比再跟產業平均比。
+    DebtRatio 判斷是否大於0.5，大於的話再和產業平均比，再大於產業平均就示警，越小越安全。
+    LongTermLiabilitiesRatio 判斷是否小於1，如果再小於產業平均再警示。越小代表有較高的融資風險，但也可能是對未來樂觀；大於1代表財務結構安全性高。
+    CurrentRatio 判斷是否小於1，小於的話要再和產業平均比，再小於就警示。大於1是安全的，否則也要看是否大於產業平均。
+    QuickRatio 判斷是否小於1，小於的話要再和產業平均比，再小於就警示。大於1是安全的，否則也要看是否大於產業平均。
+    InterestCoverage 判斷是否小於5，小於的話要再和產業平均比，再小於就警示。
+    AccountsReceivableTurnover 這個不判斷
+    AccountsReceivableTurnoverDay 這個不判斷
+    InventoryTurnover 這個不判斷
+    InventoryTurnoverDay 這個不判斷
+    TotalAssetTurnover 判斷是否小於0.5，小於的話要再和產業平均比，再小於就警示。
+    GrossMargin 
+    OperatingMargin 
+    NetIncomeMargin 判斷這一期是否小於去年同期，是的話再和產業衰退幅度比，衰退比較大就警示。
+    ROA 判斷是否小於6%，小於的話，再和產業平均比，再小於就警示。
+    ROE 判斷是否小於8%，小於的話，再和產業平均比，再小於就警示。
+    OperatingCashflowToCurrentLiability 判斷是否小於100%，小於的話，再和產業平均比，再小於就警示。
+    OperatingCashflowToLiability 
+    OperatingCashflowToNetProfit 判斷是否小於80%，小於的話，再和產業平均比，再小於就警示。
     """
 
     data = {
-    "compareItem": ratio,
-    "quarter": "true",
-    "ylabel": "%",
-    "ys": "0",
-    "revenue": "true",
-    "bcodeAvg": "true",
-    "companyAvg": "true",
-    "companyId": list(stock_ids)
+        "compareItem": ratio,
+        "quarter": "true",
+        "ylabel": "%",
+        "ys": "0",
+        "revenue": "true",
+        "bcodeAvg": "true",
+        "companyAvg": "true",
+        "companyId": list(stock_ids)
     }
 
     response = requests.post("https://mopsfin.twse.com.tw/compare/data", data = data)
 
     data = response.json()
     data = json.loads(data["json"])
+
     quarters = data["xaxisList"]
+
     values = data["graphData"]
     full_company_names = data["checkedNameList"]
-    
+
     if len(stock_ids) == 1:
         quarters_json = [[] for _ in range(2)]
         full_company_names.remove("公司平均數")
         del values[1]
     else:
         quarters_json = [[] for _ in range(len(values))]
-    # print(len(stock_ids))
-    # print(len(values), len(quarters))
-    # print(values)
 
     df = pd.DataFrame()
     df["Quarters"] = quarters
-
     company_name_list = ["Quarters"]
 
     for i in range(len(values)):
         company_data = data["graphData"][i]["data"]
         company_name = data["graphData"][i]["label"]
-        # if len(company_data) < quarters_amount:
-            # print(company_data)
-            # print(company_name)
         company_name_list.append(company_name)
         df2 = pd.DataFrame(company_data)
         df2 = df2.iloc[:, : -1]
@@ -170,10 +167,12 @@ def get_ratio():
 
     for i in range(len(values)):
         for j in range(len(quarters)):
-            try:
+            try: 
                 quarters_json[i].append({"quarter": str(quarters[j]), "value": None if pd.isna(df[company_name_list[i + 1]][j]) else round(df[company_name_list[i + 1]][j], 2)})
             except:
                 pass
+
+    # df.tail()
 
     dict_format = {
         "companies": 
@@ -182,8 +181,9 @@ def get_ratio():
         ]
     }
 
-    for i in range(len(values)):
+    industry_list = full_company_names.copy()
 
+    for i in range(len(values)):
         first_space = full_company_names[i].find(" ")
         second_space = full_company_names[i].rfind(" ")
         if (first_space and second_space) == -1:
@@ -192,6 +192,94 @@ def get_ratio():
         else:
             dict_format["companies"][i]["name"] = full_company_names[i][first_space + 1: second_space]
             dict_format["companies"][i]["stock_id"] = full_company_names[i][: first_space]
+
+    for i in range(len(stock_ids)):
+        # print(industry_list[i])
+        left_parenthesis_index = industry_list[i].find("(")
+        right_parenthesis_index = industry_list[i].find(")")
+        industry = industry_list[i][left_parenthesis_index + 3: right_parenthesis_index]
+        # industry_list[i] = industry_list[i][left_parenthesis_index + 3: right_parenthesis_index]
+        # print(industry)
+
+        company_name = company_name_list[i + 1]
+        # print(company_name)
+
+        # print(df[company_name].iloc[-1])
+        # print(df[industry].iloc[-1])
+        if ratio == "DebtRatio":
+            if df[company_name].iloc[-1] > 50:
+                if df[company_name].iloc[-1] > df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"
+        elif ratio == "LongTermLiabilitiesRatio"or ratio == "CurrentRatio" or ratio == "QuickRatio":
+            if df[company_name].iloc[-1] < 100:
+                if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"
+        elif ratio == "InterestCoverage":
+            if df[company_name].iloc[-1] < 5:
+                if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"
+        elif ratio == "TotalAssetTurnover":
+            if df[company_name].iloc[-1] < 0.5:
+                if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"
+        elif ratio == "NetIncomeMargin" or ratio == "GrossMargin":
+            if df[company_name].iloc[-1] < df[company_name].iloc[-5]:
+                if ((df[company_name].iloc[-1] - df[company_name].iloc[-5]) / df[company_name].iloc[-5]) < ((df[industry].iloc[-1] - df[industry].iloc[-5]) / df[industry].iloc[-5]):
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"
+        elif ratio == "ROA":
+            if df[company_name].iloc[-1] < 0.06:
+                if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"
+        elif ratio == "ROE":
+            if df[company_name].iloc[-1] < 0.08:
+                if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"  
+        elif ratio == "OperatingCashflowToCurrentLiability":
+            if df[company_name].iloc[-1] < 1:
+                if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N"       
+        elif ratio == "OperatingCashflowToNetProfit":
+            if df[company_name].iloc[-1] < 0.8:
+                if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                    dict_format["companies"][i]["warning"] = "Y"
+                else:
+                    dict_format["companies"][i]["warning"] = "N"
+            else:
+                dict_format["companies"][i]["warning"] = "N" 
+
+    for i in range(len(values)):   
         dict_format["companies"][i]["quarters"] = quarters_json[i]
         lastest_season = df[df[company_name_list[i + 1]].notna()][company_name_list[i + 1]].iloc[-1]
         last_season = df[df[company_name_list[i + 1]].notna()][company_name_list[i + 1]].iloc[-2]
@@ -1283,6 +1371,299 @@ def QA_response():
     first_response = first_agent.invoke({"input": msg}, config = {"configurable": {"session_id": "test_id"}})["output"]
 
     return first_response
+
+@app.route("/get_stock_price", methods = ["get"])
+def stock_price():
+    # stock_id = input("請輸入公司股票代號: ") # 2330
+    stock_id = request.args.get("stock_id")
+    stock_id = f"{stock_id}.TW"
+    # maximum_expected_return = int(input("請輸入最大整數預期報酬率: ")) / 100 # 5
+    # minumum_expected_return = int(input("請輸入最小整數預期報酬率: ")) / 100 # 3
+    maximum_expected_return = float(request.args.get("maximum_expected_return")) / 100
+    minumum_expected_return = float(request.args.get("minumum_expected_return")) / 100
+    stock = yf.Ticker(stock_id)
+    df = pd.DataFrame(stock.dividends).reset_index()
+    # df["Dividends"] = round(df["Dividends"], 2)
+    df["Year"] = df["Date"].dt.year # year 的 type 是 int32
+    df_current_year_dividends = df[df["Year"] == 2024]
+    dividends = df_current_year_dividends["Dividends"].sum()#.round(2)
+    expensive_stock_price = round(dividends / minumum_expected_return)
+    cheap_stock_price = round(dividends / maximum_expected_return)
+    # print("昂貴價:", expensive_stock_price)
+    # print("便宜價:", cheap_stock_price)
+
+    dot_index = stock_id.find(".")
+
+    response = requests.get(f"https://ws.api.cnyes.com/ws/api/v1/charting/history?resolution=1&symbol=TWS:{stock_id[: dot_index]}:STOCK&quote=1")
+
+    stock_price = str(response.json()["data"]["quote"]["6"])
+    stock_price_increase_or_decrease = str(response.json()["data"]["quote"]["220027"])
+    stock_price_increase_or_decrease_percentage = str(response.json()["data"]["quote"]["56"])
+    # print("股價:", stock_price)
+    # print("股價漲跌:", stock_price_increase_or_decrease)
+    # print("股價漲跌幅:", f"{stock_price_increase_or_decrease_percentage}%")
+
+    def get_warning(stock_id, ratio):
+        data = {
+            "compareItem": ratio,
+            "quarter": "true",
+            "ylabel": "%",
+            "ys": "0",
+            "revenue": "true",
+            "bcodeAvg": "true",
+            "companyAvg": "false",
+            "companyId": stock_id
+        }
+
+        response = requests.post("https://mopsfin.twse.com.tw/compare/data", data = data)
+
+        data = response.json()
+        data = json.loads(data["json"])
+
+        quarters = data["xaxisList"]
+
+        values = data["graphData"]
+        full_company_names = data["checkedNameList"]
+
+        df = pd.DataFrame()
+        df["Quarters"] = quarters
+        company_name_list = ["Quarters"]
+
+        for i in range(len(values)):
+            company_data = data["graphData"][i]["data"]
+            company_name = data["graphData"][i]["label"]
+            company_name_list.append(company_name)
+            df2 = pd.DataFrame(company_data)
+            df2 = df2.iloc[:, : -1]
+            df2 = df2.dropna(axis = 0)
+            df2.set_index(0, inplace = True)
+            df = pd.concat([df, df2], axis = 1)
+
+        df.columns = company_name_list
+        industry_list = full_company_names.copy()
+        for i in range(1):
+            # print(industry_list[i])
+            left_parenthesis_index = industry_list[i].find("(")
+            right_parenthesis_index = industry_list[i].find(")")
+            industry = industry_list[i][left_parenthesis_index + 3: right_parenthesis_index]
+            # industry_list[i] = industry_list[i][left_parenthesis_index + 3: right_parenthesis_index]
+            # print(industry)
+
+            company_name = company_name_list[i + 1]
+            # print(company_name)
+
+            # print(df[company_name].iloc[-1])
+            # print(df[industry].iloc[-1])
+            if ratio == "DebtRatio":
+                if df[company_name].iloc[-1] > 50:
+                    if df[company_name].iloc[-1] > df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")
+            elif ratio == "LongTermLiabilitiesRatio"or ratio == "CurrentRatio" or ratio == "QuickRatio":
+                if df[company_name].iloc[-1] < 100:
+                    if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")
+            elif ratio == "InterestCoverage":
+                if df[company_name].iloc[-1] < 5:
+                    if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")
+            elif ratio == "TotalAssetTurnover":
+                if df[company_name].iloc[-1] < 0.5:
+                    if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")
+            elif ratio == "NetIncomeMargin" or ratio == "GrossMargin":
+                if df[company_name].iloc[-1] < df[company_name].iloc[-5]:
+                    if ((df[company_name].iloc[-1] - df[company_name].iloc[-5]) / df[company_name].iloc[-5]) < ((df[industry].iloc[-1] - df[industry].iloc[-5]) / df[industry].iloc[-5]):
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")
+            elif ratio == "ROA":
+                if df[company_name].iloc[-1] < 0.06:
+                    if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")
+            elif ratio == "ROE":
+                if df[company_name].iloc[-1] < 0.08:
+                    if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N") 
+            elif ratio == "OperatingCashflowToCurrentLiability":
+                if df[company_name].iloc[-1] < 1:
+                    if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")      
+            elif ratio == "OperatingCashflowToNetProfit":
+                if df[company_name].iloc[-1] < 0.8:
+                    if df[company_name].iloc[-1] < df[industry].iloc[-1]:
+                        ratios_values.append("Y")
+                    else:
+                        ratios_values.append("N")
+                else:
+                    ratios_values.append("N")
+
+    ratios = ["DebtRatio", "LongTermLiabilitiesRatio", "CurrentRatio", "QuickRatio", "InterestCoverage", "TotalAssetTurnover",
+            "GrossMargin", "NetIncomeMargin", "ROA", "ROE", "OperatingCashflowToCurrentLiability", "OperatingCashflowToNetProfit"]
+
+    ratios_values = []
+
+    for i in range(len(ratios)):
+        # print("ratio:", ratios[i])
+        get_warning(stock_id[: dot_index], ratios[i])
+        # time.sleep(1)
+
+    # Period must be one of ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max']
+    stock_data = yf.download(stock_id, period = "max").reset_index()
+
+    df_dividends_date = df.drop("Dividends", axis = 1)
+    df_dividends_date["Date_without_time"] = pd.to_datetime(df_dividends_date["Date"].dt.date) # 原本是文字
+
+    the_date_before_dividends = []
+
+    for i in range(len(stock_data["Date"])):
+        # print(stock_data["Date"].iloc[i]) 
+        if stock_data["Date"].iloc[i] in list(df_dividends_date["Date_without_time"]):
+            # print(stock_data["Date"].iloc[i - 1])
+            the_date_before_dividends.append(stock_data["Date"].iloc[i - 1])
+
+    df_dividends_date["the_date_before_dividends"] = the_date_before_dividends
+    df_dividends_date = df_dividends_date.drop(["Date"], axis = 1) # "Date_without_time", 
+    df_dividends_date["Year"] = df_dividends_date["Date_without_time"].dt.year
+    df_dividends_date["Quarter"] = df_dividends_date["Date_without_time"].dt.quarter
+
+    # print(df_dividends_date)
+    stock_data = stock_data.reset_index(drop = True)
+    stock_data.columns = stock_data.columns.droplevel(1)  # 僅保留第二層
+    # print(stock_data)
+    
+    df_before_dividends_date_and_stock_price = pd.merge(df_dividends_date, stock_data, left_on = "the_date_before_dividends", 
+                                                        right_on = "Date")[["Date_without_time", "the_date_before_dividends", 
+                                                                            "Year", "Quarter", "Close"]]
+    df_before_dividends_date_and_stock_price = df_before_dividends_date_and_stock_price[df_before_dividends_date_and_stock_price["Year"] 
+                                                                                        >= 2015]
+    df_before_dividends_date_and_stock_price = df_before_dividends_date_and_stock_price\
+        .sort_values("the_date_before_dividends", ascending = False)\
+        .reset_index()\
+        .drop("index", axis = 1)
+
+    beginning_year = "104"
+    ending_year = "113"
+
+    data = {
+        "encodeURIComponent": 1,
+        "step": 1,
+        "firstin": 1,
+        "off": 1,
+        "queryName": "co_id",
+        "inpuType": "co_id",
+        "TYPEK": "all",
+        "isnew": "false",
+        "co_id": stock_id[: dot_index],
+        "date1": beginning_year,
+        "date2": ending_year,
+        "qryType": "1"
+    }
+    # 你的程式碼中使用的是 requests.get，表示你執行的是 GET 請求，而 data 是用於 POST 的，因此需要改為 params。
+    response = requests.get("https://mops.twse.com.tw/mops/web/t05st09_2", params = data) 
+
+    df_cash_and_stock_dividends = pd.DataFrame()
+
+    years_list = list(df_before_dividends_date_and_stock_price["Date_without_time"])[: : -1]
+    cash_dividends = []
+    stock_dividends = []
+
+    soup = bs(response.text, "html.parser")
+    # print(soup.prettify())
+    table = soup.find("table", attrs = {"class": "hasBorder"})
+    # table 
+    trs = table.find_all(name = "tr", attrs = {"class": ["odd", "even"]})
+    for tr in trs:
+        tds = tr.find_all(name = "td", attrs = {"align": "right"})
+        for i in range(len(tds)):
+            if i == 0:
+                cash_dividends.append(float(tds[i].text))
+            elif i == 4:
+                stock_dividends.append(float(tds[i].text))
+
+    df_cash_and_stock_dividends["現金股利"] = cash_dividends[: : -1]
+    df_cash_and_stock_dividends["股票股利"] = stock_dividends[: : -1]
+    df_cash_and_stock_dividends = df_cash_and_stock_dividends.iloc[: len(years_list)]
+    df_cash_and_stock_dividends.index = years_list
+    df_cash_and_stock_dividends = df_cash_and_stock_dividends\
+        .reset_index()\
+        .rename(columns = {"index": "the_date_of_dividends"})\
+        .sort_values("the_date_of_dividends", ascending = False)
+    ten_years_average_dividends = round(df_cash_and_stock_dividends["現金股利"].sum() / 10, 2)
+
+    df_dividends = pd.merge(df_before_dividends_date_and_stock_price, df_cash_and_stock_dividends, left_on = "Date_without_time", 
+                            right_on = "the_date_of_dividends")
+    df_dividends["殖利率"] = round(df_dividends["現金股利"] / df_dividends["Close"], 4)
+    df_dividends["現金股利"] = round(df_dividends["現金股利"], 2)
+    dividends_yield = round(df_dividends["殖利率"].sum() / 10, 4)
+
+    # print("近10年平均股利:", ten_years_average_dividends)
+    # print("近10年平均殖利率:", dividends_yield)
+    # df_dividends
+    # ratios_values
+
+    dict_format = {
+    "stockCode": stock_id, 
+    "stockPrice": {
+        "currentPrice": stock_price,         
+        "priceChange": stock_price_increase_or_decrease,          
+        "priceChangePercent": stock_price_increase_or_decrease_percentage,   
+        "expensivePrice": expensive_stock_price,       
+        "cheapPrice": cheap_stock_price           
+    }
+    }
+    dict_format["warning"] = {}
+    for i in range(len(ratios)):
+        dict_format["warning"][ratios[i]] = ratios_values[i]
+
+    dict_format["dividendHistory"] = {
+        "years": [],
+        "last10YearsDividends": [],
+        "last10YearsDividendYield": []
+    }
+
+    for i in range(len(df_dividends)):
+        row = df_dividends.iloc[i]
+        # print(f"{row['Year']}Q{row['Quarter']}", row["現金股利"], row["殖利率"])
+        dict_format["dividendHistory"]["years"].append(f"{row['Year']}Q{row['Quarter']}")
+        dict_format["dividendHistory"]["last10YearsDividends"].append(row["現金股利"])
+        dict_format["dividendHistory"]["last10YearsDividendYield"].append(row["殖利率"])
+
+    dict_format["averages"] = {
+    "averageDividend": ten_years_average_dividends,
+    "averageDividendYield": dividends_yield
+    }
+
+    return json.dumps(dict_format, ensure_ascii = False, indent = 2)
 
 if __name__ == "__main__":
     app.run(debug = True)
